@@ -86,6 +86,29 @@ fn failed_swap_restores_old_app() {
     assert!(!backup.exists());
 }
 
+#[test]
+fn process_listing_matches_canonical_fixture_paths_only() {
+    let root = Stage::new(&std::env::temp_dir()).unwrap();
+    let executable = root.0.join("Impeccable Loop");
+    fs::write(&executable, b"inert fixture data").unwrap();
+    let canonical = fs::canonicalize(&executable).unwrap();
+    #[cfg(unix)]
+    {
+        let symlink = root.0.join("loop-link");
+        std::os::unix::fs::symlink(&executable, &symlink).unwrap();
+        assert!(
+            refuse_running_from_listing(&canonical, &format!("{}\n", symlink.display())).is_err()
+        );
+    }
+
+    assert!(refuse_running_from_listing(&canonical, "/usr/bin/other\n").is_ok());
+    assert!(refuse_running_from_listing(
+        &canonical,
+        &format!("{}-helper\n", canonical.display())
+    )
+    .is_ok());
+}
+
 #[cfg(target_os = "macos")]
 mod mac {
     use super::*;
@@ -95,7 +118,7 @@ mod mac {
     fn fixture(version: &str, root: &Path) -> Vec<u8> {
         let app = root.join(APP);
         fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
-        fs::copy("/bin/sleep", app.join("Contents/MacOS/Impeccable Loop")).unwrap();
+        fs::write(app.join("Contents/MacOS/Impeccable Loop"), b"inert fixture data").unwrap();
         fs::write(app.join("Contents/Info.plist"), format!(r#"<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleExecutable</key><string>Impeccable Loop</string><key>CFBundleShortVersionString</key><string>{version}</string></dict></plist>"#)).unwrap();
         let zip = root.join("fixture.zip");
         assert!(Command::new("/usr/bin/ditto")
@@ -287,24 +310,16 @@ mod mac {
         let apps = home.0.join("Applications");
         fs::create_dir(&apps).unwrap();
         fs::rename(source.0.join(APP), apps.join(APP)).unwrap();
-        let mut process = Command::new(apps.join(APP).join("Contents/MacOS/Impeccable Loop"))
-            .arg("60")
-            .spawn()
-            .unwrap();
-        // Wait until exec has happened by observing the same process listing the installer uses.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while refuse_running(&apps.join(APP)).is_ok() && std::time::Instant::now() < deadline {
-            thread::yield_now();
-        }
+        let exe = executable(&apps.join(APP)).unwrap();
+        let listing = format!("{}\n", exe.display());
         let pins = pin("2.0.0", &bytes);
-        let result = run_inner(
+        let result = run_inner_with_process_listing(
             &args("update"),
             &io(&home.0, "http://127.0.0.1:1"),
             &pins,
             "macos",
+            Some(&listing),
         );
-        process.kill().unwrap();
-        process.wait().unwrap();
         let error = result.unwrap_err();
         assert!(error.contains("Quit Loop first"), "{error}");
         assert_eq!(
@@ -312,11 +327,12 @@ mod mac {
             "1.0.0"
         );
         fs::rename(apps.join(APP), apps.join(".impeccable-loop-previous.app")).unwrap();
-        let result = run_inner(
+        let result = run_inner_with_process_listing(
             &args("update"),
             &io(&home.0, "http://127.0.0.1:1"),
             &pin("1.0.0", &bytes),
             "macos",
+            None,
         )
         .unwrap();
         assert!(result.contains("already current"));

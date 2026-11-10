@@ -838,7 +838,6 @@ fn live_generate_boot_and_open_run_the_lane_from_a_cold_project() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&opener, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    std::fs::write(dir.join(".impeccable/config.local.json"), format!("{{\"browser\":\"{}\"}}", opener.display())).unwrap();
     // A stand-in dev server serving the injected page, so --dev-url finds it.
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let dev_port = listener.local_addr().unwrap().port();
@@ -857,6 +856,9 @@ fn live_generate_boot_and_open_run_the_lane_from_a_cold_project() {
         .args(["live-generate", "--selector", "h1", "--action", "bolder", "--boot", "--open", "--wait-for-browser", "1500"])
         .current_dir(&dir)
         .env("IMPECCABLE_LIVE_COPY_AGENT", "off")
+        // Project config browser executables are untrusted. This fixture is
+        // explicitly trusted through the dedicated environment override.
+        .env("IMPECCABLE_BROWSER", &opener)
         .env("IMPECCABLE_DEV_URL_CANDIDATES", format!("http://127.0.0.1:{}/", dev_port))
         .env("IMPECCABLE_AGENT_TARGET_TIMEOUT_MS", "400")
         .output()

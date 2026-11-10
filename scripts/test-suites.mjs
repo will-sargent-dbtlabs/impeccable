@@ -77,6 +77,8 @@ export const SUITES = {
           'tests/ci-test-plan.test.mjs',
           'tests/rust-test-selection.test.mjs',
           'tests/cli-shim.test.mjs',
+          'tests/fork-install.test.mjs',
+          'tests/fork-runtime.test.mjs',
           'tests/check-engine-release.test.mjs',
           'tests/check-loop-release.test.mjs',
           'tests/launcher-download.test.mjs',

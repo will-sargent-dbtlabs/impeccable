@@ -717,6 +717,7 @@ fn update_check_disabled_by_config(cwd: &str) -> bool {
 
 /// JS: computeUpdateDirective()
 pub fn compute_update_directive(cwd: &str, env: &Env, provider: &Provider) -> Option<String> {
+    if crate::telemetry::telemetry_disabled(env, cwd) { return None; }
     if env.get("IMPECCABLE_NO_UPDATE_CHECK").map(|v| !v.is_empty()).unwrap_or(false) {
         return None;
     }

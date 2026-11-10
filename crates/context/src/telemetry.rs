@@ -65,8 +65,18 @@ pub fn user_config_path(env: &Env) -> String {
     jsp::join(&[&crate::util::homedir(env), ".impeccable", "config.json"])
 }
 
-fn config_says_off(path: &str) -> bool {
-    safe_read(path).and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v.get("telemetry").and_then(Value::as_bool)) == Some(false)
+fn project_config_reason(path: &str) -> Option<String> {
+    let reason = |detail: &str| format!("project config {}: {}", impeccable_common::jsp::to_posix(path), detail);
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => return Some(reason("unreadable; telemetry denied")),
+    };
+    match serde_json::from_str::<Value>(&text) {
+        Ok(Value::Object(m)) if m.get("telemetry").and_then(Value::as_bool) == Some(false) => Some(format!("\"telemetry\": false in {}", impeccable_common::jsp::to_posix(path))),
+        Ok(Value::Object(_)) => None,
+        Ok(_) | Err(_) => Some(reason("malformed; telemetry denied")),
+    }
 }
 
 /// Why telemetry is off, or `None` when it is on: `DO_NOT_TRACK` or
@@ -81,8 +91,15 @@ pub fn opt_out_reason(env: &Env, cwd: &str) -> Option<String> {
         }
     }
     let user = user_config_path(env);
-    if config_says_off(&user) {
-        return Some(format!("\"telemetry\": false in {}", impeccable_common::jsp::to_posix(&user)));
+    match std::fs::read_to_string(&user) {
+        Ok(text) => match serde_json::from_str::<Value>(&text) {
+            Ok(Value::Object(m)) if m.get("telemetry").and_then(Value::as_bool) == Some(true) => {}
+            Ok(Value::Object(m)) if m.get("telemetry").and_then(Value::as_bool) == Some(false) => return Some(format!("\"telemetry\": false in {}", impeccable_common::jsp::to_posix(&user))),
+            Ok(Value::Object(_)) => return Some(format!("explicit consent missing in {}", impeccable_common::jsp::to_posix(&user))),
+            Ok(_) | Err(_) => return Some(format!("user config is malformed: {}", impeccable_common::jsp::to_posix(&user))),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some("explicit user consent is missing".into()),
+        Err(_) => return Some(format!("user config is unreadable: {}", impeccable_common::jsp::to_posix(&user))),
     }
     // The project config is read where `context` reads its defaults: the
     // working directory, the resolved project root, then the repo root.
@@ -100,11 +117,11 @@ pub fn opt_out_reason(env: &Env, cwd: &str) -> Option<String> {
     for root in &roots {
         for name in ["config.local.json", "config.json"] {
             let p = jsp::join(&[root, ".impeccable", name]);
-            if config_says_off(&p) {
+            if let Some(reason) = project_config_reason(&p) {
                 // Shown with forward slashes on every platform, like every
                 // path the engine prints.
                 let shown = jsp::relative(cwd, cwd, &p);
-                return Some(format!("\"telemetry\": false in {}", impeccable_common::jsp::to_posix(if shown.is_empty() { &p } else { &shown })));
+                return Some(if shown.is_empty() { reason } else { reason.replace(&p, &impeccable_common::jsp::to_posix(&shown)) });
             }
         }
     }
@@ -596,7 +613,7 @@ impl ChoicePing {
 /// POSTs the ping to `/api/chosen` within `timeout`. Never fails the
 /// caller: any error is a false.
 pub fn send_choice(env: &Env, cwd: &str, ping: &ChoicePing, timeout: Duration) -> bool {
-    if timeout.is_zero() {
+    if timeout.is_zero() || telemetry_disabled(env, cwd) {
         return false;
     }
     let url = format!("{}/chosen", api_base(env));
@@ -747,7 +764,11 @@ pub fn run(args: &[String], io: &mut impeccable_common::Io) -> i32 {
     // A missing file is an empty config; one that does not parse to an
     // object is the user's to fix, never overwritten.
     let read = || -> Result<Map<String, Value>, String> {
-        let Some(text) = safe_read(&path) else { return Ok(Map::new()) };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
+            Err(e) => return Err(format!("{} is unreadable ({})", impeccable_common::jsp::to_posix(&path), e)),
+        };
         match serde_json::from_str::<Value>(&text) {
             Ok(Value::Object(m)) => Ok(m),
             Ok(_) => Err(format!("{} is not a JSON object", impeccable_common::jsp::to_posix(&path))),
@@ -776,7 +797,7 @@ pub fn run(args: &[String], io: &mut impeccable_common::Io) -> i32 {
             if cmd == "off" {
                 m.insert("telemetry".into(), Value::Bool(false));
             } else {
-                m.remove("telemetry");
+                m.insert("telemetry".into(), Value::Bool(true));
             }
             if let Err(e) = write(&m) {
                 io.err(&format!("telemetry: could not write the user config ({})\n", e));
@@ -1177,6 +1198,9 @@ mod tests {
             }
             e
         };
+        assert!(opt_out_reason(&base(&[]), &cwd).is_some(), "missing consent is off");
+        std::fs::create_dir_all(format!("{}/.impeccable", home)).unwrap();
+        std::fs::write(format!("{}/.impeccable/config.json", home), r#"{"telemetry": true}"#).unwrap();
         assert_eq!(opt_out_reason(&base(&[]), &cwd), None);
         for v in ["1", "true", "yes", "anything"] {
             assert!(telemetry_disabled(&base(&[("DO_NOT_TRACK", v)]), &cwd), "{v}");
@@ -1196,9 +1220,49 @@ mod tests {
     }
 
     #[test]
+    fn malformed_or_unreadable_user_consent_is_off() {
+        let cwd = temp_dir("invalid-consent");
+        let home = format!("{cwd}/home");
+        std::fs::create_dir_all(format!("{home}/.impeccable")).unwrap();
+        let e = env(&[("HOME", &home), ("USERPROFILE", &home)]);
+        let path = format!("{home}/.impeccable/config.json");
+        std::fs::write(&path, "{").unwrap();
+        assert!(telemetry_disabled(&e, &cwd));
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(telemetry_disabled(&e, &cwd));
+    }
+
+    #[test]
+    fn send_choice_rechecks_consent_before_opening_a_connection() {
+        let cwd = temp_dir("send-guard");
+        let home = format!("{cwd}/home");
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/api", server.server_addr());
+        let e = env(&[("HOME", &home), ("IMPECCABLE_API_URL", &base)]);
+        assert!(!send_choice(&e, &cwd, &ChoicePing::default(), Duration::from_secs(1)));
+        assert!(server.recv_timeout(Duration::from_millis(100)).unwrap().is_none(), "no request is made without explicit consent");
+    }
+
+    #[test]
+    fn telemetry_on_persists_explicit_true_and_preserves_other_keys() {
+        let cwd = temp_dir("verb-on");
+        let home = format!("{cwd}/home");
+        std::fs::create_dir_all(format!("{home}/.impeccable")).unwrap();
+        std::fs::write(format!("{home}/.impeccable/config.json"), r#"{"other": 1}"#).unwrap();
+        let e = env(&[("HOME", &home), ("USERPROFILE", &home)]);
+        let (mut io, _) = impeccable_common::Io::captured("", cwd.into(), e);
+        assert_eq!(run(&["on".into()], &mut io), 0);
+        let cfg: Value = serde_json::from_str(&std::fs::read_to_string(format!("{home}/.impeccable/config.json")).unwrap()).unwrap();
+        assert_eq!(cfg, json!({"other": 1, "telemetry": true}));
+    }
+
+    #[test]
     fn the_telemetry_verb_records_the_choice_in_the_user_config() {
         let cwd = temp_dir("verb");
         let home = format!("{}/home", cwd);
+        std::fs::create_dir_all(format!("{}/.impeccable", home)).unwrap();
+        std::fs::write(format!("{}/.impeccable/config.json", home), r#"{"telemetry": true}"#).unwrap();
         let call = |args: &[&str]| {
             let e = env(&[("HOME", home.as_str()), ("USERPROFILE", home.as_str())]);
             let (mut io, cap) = impeccable_common::Io::captured("", std::path::PathBuf::from(&cwd), e);
@@ -1218,7 +1282,7 @@ mod tests {
         assert!(call(&["status"]).1.starts_with("telemetry: off"));
         assert!(call(&["on"]).1.starts_with("telemetry: on."));
         let cfg: Value = serde_json::from_str(&std::fs::read_to_string(format!("{}/.impeccable/config.json", home)).unwrap()).unwrap();
-        assert_eq!(cfg, json!({ "other": 1 }));
+        assert_eq!(cfg, json!({ "other": 1, "telemetry": true }));
         assert_eq!(call(&["maybe"]).0, 1);
     }
 
@@ -1228,15 +1292,40 @@ mod tests {
         std::fs::create_dir_all(format!("{}/.git", root)).unwrap();
         std::fs::create_dir_all(format!("{}/.impeccable", root)).unwrap();
         std::fs::write(format!("{}/.impeccable/config.json", root), r#"{"telemetry": false}"#).unwrap();
+        let home = format!("{root}/home");
+        std::fs::create_dir_all(format!("{home}/.impeccable")).unwrap();
+        std::fs::write(format!("{home}/.impeccable/config.json"), r#"{"telemetry": true}"#).unwrap();
         // A workspace monorepo, run from a package: the same roots `context`
         // reads its config defaults from.
         std::fs::write(format!("{}/package.json", root), r#"{"private": true, "workspaces": ["packages/*"]}"#).unwrap();
         let sub = format!("{}/packages/web", root);
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::write(format!("{}/package.json", sub), r#"{"name": "web"}"#).unwrap();
-        let e = env(&[("HOME", &format!("{}/home", root)), ("USERPROFILE", &format!("{}/home", root))]);
+        let e = env(&[("HOME", &home), ("USERPROFILE", &home)]);
         let reason = opt_out_reason(&e, &sub).expect("the project root's config counts");
         assert!(reason.contains("\"telemetry\": false in") && reason.contains(".impeccable/config.json"), "{reason}");
+    }
+
+    #[test]
+    fn invalid_existing_project_configs_deny_even_with_user_consent() {
+        let root = temp_dir("invalid-project-config");
+        let home = format!("{root}/home");
+        std::fs::create_dir_all(format!("{home}/.impeccable")).unwrap();
+        std::fs::write(format!("{home}/.impeccable/config.json"), r#"{"telemetry":true}"#).unwrap();
+        std::fs::create_dir_all(format!("{root}/.impeccable")).unwrap();
+        let local = format!("{root}/.impeccable/config.local.json");
+        let e = env(&[("HOME", &home), ("USERPROFILE", &home)]);
+        std::fs::write(&local, "{").unwrap();
+        let why = opt_out_reason(&e, &root).expect("invalid project config denies telemetry");
+        assert!(why.contains("config.local.json") && why.contains("malformed"), "{why}");
+        std::fs::remove_file(&local).unwrap();
+        std::fs::create_dir(&local).unwrap();
+        let why = opt_out_reason(&e, &root).expect("directory at config path is unreadable");
+        assert!(why.contains("config.local.json") && why.contains("unreadable"), "{why}");
+        std::fs::remove_dir(&local).unwrap();
+        std::fs::write(format!("{root}/.impeccable/config.json"), "[]").unwrap();
+        let why = opt_out_reason(&e, &root).expect("non-object project config denies telemetry");
+        assert!(why.contains("malformed"), "{why}");
     }
 
     #[test]
@@ -1254,6 +1343,17 @@ mod tests {
                 assert!(err.contains(why) && err.contains("Nothing was changed"), "{err}");
                 assert_eq!(std::fs::read_to_string(format!("{}/.impeccable/config.json", home)).unwrap(), body, "untouched");
             }
+        }
+        let path = format!("{}/.impeccable/config.json", home);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        for cmd in ["off", "on"] {
+            let e = env(&[("HOME", home.as_str()), ("USERPROFILE", home.as_str())]);
+            let (mut io, cap) = impeccable_common::Io::captured("", std::path::PathBuf::from(&cwd), e);
+            assert_eq!(run(&[cmd.to_string()], &mut io), 1);
+            let err = String::from_utf8(cap.stderr.borrow().clone()).unwrap();
+            assert!(err.contains("is unreadable") && err.contains("Nothing was changed"), "{err}");
+            assert!(std::fs::metadata(&path).unwrap().is_dir(), "the unreadable config path remains untouched");
         }
     }
 

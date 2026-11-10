@@ -64,8 +64,9 @@ fn free_port() -> u16 {
 
 #[test]
 fn live_server_source_ignores_and_poller_fields() {
-    let dir = std::env::temp_dir().join(format!("impeccable-live-sec-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let base = std::env::temp_dir().join(format!("impeccable-live-sec-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join(".worktrees/project");
     std::fs::create_dir_all(dir.join("prototype")).unwrap();
     let dir = std::fs::canonicalize(&dir).unwrap();
     std::fs::write(dir.join("prototype/index.html"), "<h1>page</h1>\n").unwrap();
@@ -106,15 +107,44 @@ fn live_server_source_ignores_and_poller_fields() {
         let (st, body) = http(port, "GET", &format!("/source?token={}&path=prototype/index.html", token), None);
         assert_eq!(st, 200, "{}", body);
         assert!(body.contains("<h1>page</h1>"));
+        for path in ["./prototype/index.html", dir.join("prototype/index.html").to_str().unwrap()] {
+            let (st, body) = http(port, "GET", &format!("/source?token={}&path={}", token, path), None);
+            assert_eq!(st, 200, "{path}: {body}");
+            assert!(body.contains("<h1>page</h1>"), "{path}: {body}");
+        }
+        for path in ["prototype/../prototype/index.html", "prototype/.hidden/index.html"] {
+            let (st, body) = http(port, "GET", &format!("/source?token={}&path={}", token, path), None);
+            assert_eq!(st, 403, "{path}: {body}");
+        }
+
+        // The live Svelte adapter reads params from the component directory
+        // and from each revision directory under node_modules.
+        for path in [
+            "node_modules/.impeccable-live/abc123/params.json",
+            "node_modules/.impeccable-live/abc123/r2/params.json",
+        ] {
+            let file = dir.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, r#"{"params":{"label":"Visible"}}"#).unwrap();
+            let (st, body) = http(port, "GET", &format!("/source?token={}&path={}", token, path), None);
+            assert_eq!(st, 200, "{path}: {body}");
+            assert!(body.contains("Visible"), "{path}: {body}");
+        }
 
         // ...but not through a symlink that leaves the workspace (#618).
         let outside = std::env::temp_dir().join(format!("impeccable-live-outside-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&outside);
         std::fs::create_dir_all(&outside).unwrap();
-        std::fs::write(outside.join("secret.txt"), "OUTSIDE SECRET").unwrap();
-        std::os::unix::fs::symlink(outside.join("secret.txt"), dir.join("linked.txt")).unwrap();
-        let (st, body) = http(port, "GET", &format!("/source?token={}&path=linked.txt", token), None);
+        std::fs::write(outside.join("secret.html"), "OUTSIDE SECRET").unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.html"), dir.join("linked.html")).unwrap();
+        let (st, body) = http(port, "GET", &format!("/source?token={}&path=linked.html", token), None);
         assert_eq!(st, 403, "{}", body);
+        // Denied extensions are forbidden regardless of whether a file exists.
+        std::fs::write(dir.join("broken.txt"), "present but forbidden").unwrap();
+        for path in ["broken.txt", "missing.txt"] {
+            let (st, body) = http(port, "GET", &format!("/source?token={}&path={}", token, path), None);
+            assert_eq!(st, 403, "{path}: {body}");
+        }
         let _ = std::fs::remove_dir_all(&outside);
 
         // A symlink whose target stays inside still serves.
@@ -123,9 +153,21 @@ fn live_server_source_ignores_and_poller_fields() {
         assert_eq!(st, 200, "{}", body);
         assert!(body.contains("<h1>page</h1>"));
 
-        // A broken symlink is a 404.
-        std::os::unix::fs::symlink(dir.join("missing-target.txt"), dir.join("broken.txt")).unwrap();
-        let (st, _) = http(port, "GET", &format!("/source?token={}&path=broken.txt", token), None);
+        // Secret files and credential-like JSON are denied over the real route.
+        std::fs::write(dir.join(".env"), "SECRET=value").unwrap();
+        std::fs::write(dir.join("credentials.json"), r#"{"token":"secret"}"#).unwrap();
+        std::fs::write(dir.join("secrets.json"), r#"{"apiKey":"secret"}"#).unwrap();
+        for path in [".env", "credentials.json", "secrets.json"] {
+            let (st, body) = http(port, "GET", &format!("/source?token={}&path={}", token, path), None);
+            assert_eq!(st, 403, "{path}: {body}");
+        }
+        std::os::unix::fs::symlink(dir.join(".env"), dir.join("source.html")).unwrap();
+        let (st, body) = http(port, "GET", &format!("/source?token={}&path=source.html", token), None);
+        assert_eq!(st, 403, "source-named symlink to .env: {body}");
+
+        // A broken symlink with an allowed source extension is a 404.
+        std::os::unix::fs::symlink(dir.join("missing-target.html"), dir.join("broken.html")).unwrap();
+        let (st, _) = http(port, "GET", &format!("/source?token={}&path=broken.html", token), None);
         assert_eq!(st, 404);
 
         // /live.js carries the project detector waivers and the resolver
@@ -166,7 +208,7 @@ fn live_server_source_ignores_and_poller_fields() {
     }
     let _ = child.kill();
     let _ = child.wait();
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&base);
     result.expect("live-server security scenario");
 }
 

@@ -74,6 +74,9 @@ fn signed_in(name: &str) -> (Fake, HashMap<String, String>) {
     fake.knobs.lock().unwrap().health = true;
     let env = fake.env(name);
     login(&env);
+    // Positive upload fixtures explicitly opt in inside this isolated HOME.
+    assert!(run(&env, Path::new(&env["IMPECCABLE_HOME"]), &["telemetry", "on"]).status.success());
+    assert!(run(&env, Path::new(&env["IMPECCABLE_HOME"]), &["health", "on"]).status.success());
     (fake, env)
 }
 
@@ -85,6 +88,40 @@ fn scans(fake: &Fake) -> Vec<serde_json::Value> {
 
 fn run(env: &HashMap<String, String>, cwd: &Path, args: &[&str]) -> Output {
     impeccable(env, cwd, args).output().unwrap()
+}
+
+#[test]
+fn health_upload_requires_both_consents_and_respects_do_not_track() {
+    let fake = Fake::start();
+    fake.knobs.lock().unwrap().health = true;
+    let env = fake.env("health-consent-gates");
+    login(&env);
+    let root = repo(&env, Some("https://github.com/acme/my-site"));
+
+    // Fresh sign-in has neither consent and must not scan/upload.
+    run(&env, &root, &["detect", "."]);
+    assert_eq!(fake.hits("/cli/v1/health/scans"), 0, "fresh sign-in");
+
+    // Health sync without telemetry still cannot upload.
+    assert!(run(&env, &root, &["health", "on"]).status.success());
+    run(&env, &root, &["detect", "."]);
+    assert_eq!(fake.hits("/cli/v1/health/scans"), 0, "health only");
+
+    // Telemetry without health sync also cannot upload.
+    assert!(run(&env, &root, &["health", "off"]).status.success());
+    assert!(run(&env, &root, &["telemetry", "on"]).status.success());
+    run(&env, &root, &["detect", "."]);
+    assert_eq!(fake.hits("/cli/v1/health/scans"), 0, "telemetry only");
+
+    // Both explicit choices permit one upload.
+    assert!(run(&env, &root, &["health", "on"]).status.success());
+    run(&env, &root, &["detect", "."]);
+    assert_eq!(fake.hits("/cli/v1/health/scans"), 1, "both consents");
+
+    let mut opted_out = env.clone();
+    opted_out.insert("DO_NOT_TRACK".into(), "1".into());
+    run(&opted_out, &root, &["detect", "."]);
+    assert_eq!(fake.hits("/cli/v1/health/scans"), 1, "DO_NOT_TRACK suppresses uploads");
 }
 
 #[test]
@@ -279,6 +316,8 @@ fn an_upload_that_needs_a_fresh_token_keeps_the_sign_in() {
     }
     let env = fake.env("health-refresh");
     login(&env);
+    assert!(run(&env, Path::new(&env["IMPECCABLE_HOME"]), &["telemetry", "on"]).status.success());
+    assert!(run(&env, Path::new(&env["IMPECCABLE_HOME"]), &["health", "on"]).status.success());
     let root = repo(&env, Some("https://github.com/acme/my-site"));
     run(&env, &root, &["detect", "."]);
     assert_eq!(scans(&fake).len(), 1);
@@ -320,6 +359,8 @@ fn each_service_gives_its_own_notice() {
     let mut prod_env = env.clone();
     prod_env.insert("IMPECCABLE_ACCOUNT_URL".into(), production.url.clone());
     login(&prod_env);
+    assert!(run(&prod_env, Path::new(&prod_env["IMPECCABLE_HOME"]), &["telemetry", "on"]).status.success());
+    assert!(run(&prod_env, Path::new(&prod_env["IMPECCABLE_HOME"]), &["health", "on"]).status.success());
     let out = run(&prod_env, &root, &["detect", "."]);
     assert_eq!(production.hits("/cli/v1/health/scans"), 1);
     assert!(String::from_utf8_lossy(&out.stderr).contains(notice));
@@ -336,6 +377,8 @@ fn a_busy_sign_in_skips_the_upload_instead_of_holding_detect() {
     }
     let env = fake.env("health-busy-lock");
     login(&env);
+    assert!(run(&env, Path::new(&env["IMPECCABLE_HOME"]), &["telemetry", "on"]).status.success());
+    assert!(run(&env, Path::new(&env["IMPECCABLE_HOME"]), &["health", "on"]).status.success());
     let root = repo(&env, Some("https://github.com/acme/my-site"));
     let accounts = Path::new(&env["IMPECCABLE_HOME"]).join("account");
     let dir = std::fs::read_dir(&accounts).unwrap().next().unwrap().unwrap().path();

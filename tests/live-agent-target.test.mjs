@@ -14,6 +14,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFile, execFileSync, spawn } from 'node:child_process';
+import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { ENGINE_MISSING_MESSAGE, engineEnv, findEngineBinary } from './lib/engine-bin.mjs';
 import { armLiveServerReaper, trackServerChild } from './lib/live-servers.mjs';
@@ -100,41 +101,37 @@ function postJson(server, path, body) {
  * messages so a test can await the next one matching a predicate.
  */
 async function openSseClient(server, { clientId } = {}) {
-  const controller = new AbortController();
-  const res = await fetch(
+  const req = http.request(
     `http://localhost:${server.port}/events?token=${server.token}` + (clientId ? `&clientId=${clientId}` : ''),
-    { signal: controller.signal },
+    { agent: false, headers: { Connection: 'close' } },
   );
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
   const messages = [];
   const waiters = [];
   let buffer = '';
-  (async () => {
-    try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        let idx;
-        while ((idx = buffer.indexOf('\n\n')) !== -1) {
-          const frame = buffer.slice(0, idx);
-          buffer = buffer.slice(idx + 2);
-          const dataLine = frame.split('\n').find((l) => l.startsWith('data: '));
-          if (!dataLine) continue;
-          let msg;
-          try { msg = JSON.parse(dataLine.slice(6)); } catch { continue; }
-          messages.push(msg);
-          for (let i = waiters.length - 1; i >= 0; i -= 1) {
-            if (waiters[i].match(msg)) {
-              waiters[i].resolve(msg);
-              waiters.splice(i, 1);
-            }
+  req.on('response', (res) => {
+    res.setEncoding('utf8');
+    res.on('data', (chunk) => {
+      buffer += chunk;
+      let idx;
+      while ((idx = buffer.indexOf('\n\n')) !== -1) {
+        const frame = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        const dataLine = frame.split('\n').find((line) => line.startsWith('data: '));
+        if (!dataLine) continue;
+        let msg;
+        try { msg = JSON.parse(dataLine.slice(6)); } catch { continue; }
+        messages.push(msg);
+        for (let i = waiters.length - 1; i >= 0; i -= 1) {
+          if (waiters[i].match(msg)) {
+            waiters[i].resolve(msg);
+            waiters.splice(i, 1);
           }
         }
       }
-    } catch { /* stream closed */ }
-  })();
+    });
+  });
+  req.on('error', () => { /* stream closed */ });
+  req.end();
   return {
     messages,
     next(match, timeoutMs = 5000) {
@@ -145,7 +142,7 @@ async function openSseClient(server, { clientId } = {}) {
         waiters.push({ match, resolve: (m) => { clearTimeout(timer); resolve(m); } });
       });
     },
-    close() { controller.abort(); },
+    close() { req.destroy(); },
   };
 }
 

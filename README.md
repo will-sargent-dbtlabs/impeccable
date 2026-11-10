@@ -2,11 +2,17 @@
 
 The design vocabulary for your coding agent. Steer with `polish` and `bolder`, review with `critique` and `audit`, and catch AI slop before it ships.
 
-From your project root:
+This personal fork installs a locally built engine with reporting, update checks,
+and product catalog requests off by default. Follow the pinned toolchain
+bootstrap in [docs/FORK.md](docs/FORK.md), then run from this checkout:
 
 ```bash
-npx impeccable install
+node scripts/fork/build.mjs
+node scripts/fork/install.mjs
 ```
+
+Use `~/.local/bin/impeccable-fork` to run the managed engine. The upstream
+`npx impeccable install` command installs the published upstream package.
 
 Reload your coding tool, then run `/impeccable init` in your agent (`$impeccable init` on Codex).
 
@@ -208,7 +214,7 @@ The folders that hold decision-round state (`.impeccable/questions/`, `.impeccab
 
 **Something broken?** `/impeccable doctor` finds stale context files, unused settings, and broken hooks. [Fix setup problems](https://impeccable.style/docs/doctor).
 
-**Telemetry.** When a new design starts, the skill fetches a set of visual directions from the impeccable.style catalog. Turning telemetry off doesn't stop that request; it stops the anonymous record of which directions were shown and which one you picked, which is how the catalog learns what works. Your project name, files, code, and `PRODUCT.md` are never sent. Disable telemetry with `npx impeccable telemetry off`, `DO_NOT_TRACK=1`, or `"telemetry": false` in `.impeccable/config.json` for the whole project. The full list of what is sent is on the [privacy page](https://impeccable.style/privacy).
+**Reporting and catalog requests are separate.** Reporting controls whether Impeccable sends its documented anonymous usage or health reports. The product catalog can make separate requests for visual directions; turning reporting off alone does not block those requests. The local fork install described in [docs/FORK.md](docs/FORK.md) disables reporting, update checks, and catalog requests by default while keeping configured provider image generation available. A clean clone needs the documented pinned Bun bootstrap and locked dependency install before building. Its wrapper only governs Impeccable's own requests; it does not block arbitrary network access by an AI agent or a website. Provider requests may send prompts or images to the configured provider. See the [fork security review](docs/FORK-SECURITY.md) for the reporting and live-page trust boundaries.
 
 ## Community
 
