@@ -125,6 +125,7 @@ fn api_base(env: &Env) -> String {
 }
 
 pub(crate) fn card_base(env: &Env) -> String {
+    if crate::telemetry::env_opts_out(env.get("IMPECCABLE_NO_REMOTE_CATALOG")) { return String::new(); }
     env.get("IMPECCABLE_CARD_BASE").filter(|v| !v.is_empty()).cloned().unwrap_or_else(|| "https://impeccable.style/worlds/cards".to_string())
 }
 
@@ -142,6 +143,7 @@ fn form_encode(s: &str) -> String {
 }
 
 fn fetch_roll(env: &Env, cwd: &str, budget: &mut ApiBudget, scope: &str, key: &str, mode: Option<&str>, grain: Option<&str>, platform: Option<&str>, reroll: usize) -> Option<Value> {
+    if crate::telemetry::env_opts_out(env.get("IMPECCABLE_NO_REMOTE_CATALOG")) { return None; }
     let mut params = vec![("scope", scope.to_string()), ("key", key.to_string()), ("reroll", reroll.to_string())];
     if let Some(m) = mode {
         params.push(("mode", m.to_string()));
@@ -326,8 +328,9 @@ fn render_challenger(env: &Env, concept: &Value, index: usize) -> String {
 fn challenger_card(env: &Env, concept: &Value) -> (String, String, String) {
     let cb = card_base(env);
     let id = vs(concept, "id");
-    let board = concept.get("cardBoard").filter(|v| crate::staleness::js_truthy(v)).map(value_str).unwrap_or_else(|| format!("{}/{}.webp", cb, id));
-    let hero = concept.get("cardHero").filter(|v| crate::staleness::js_truthy(v)).map(value_str).unwrap_or_else(|| format!("{}/{}-hero.webp", cb, id));
+    let disabled = crate::telemetry::env_opts_out(env.get("IMPECCABLE_NO_REMOTE_CATALOG"));
+    let board = if disabled { String::new() } else { concept.get("cardBoard").filter(|v| crate::staleness::js_truthy(v)).map(value_str).unwrap_or_else(|| format!("{}/{}.webp", cb, id)) };
+    let hero = if disabled { String::new() } else { concept.get("cardHero").filter(|v| crate::staleness::js_truthy(v)).map(value_str).unwrap_or_else(|| format!("{}/{}-hero.webp", cb, id)) };
     (id, board, hero)
 }
 
@@ -579,6 +582,11 @@ fn render_roll(env: &Env, cwd: &str, budget: &mut ApiBudget, a: &SeedArgs) -> Re
             return Ok((scope, reroll, fill(t::DEGRADED_SAFER, &pairs), true, RollMeta { worlds: vec![], api: false, pool_revision: None, hand_id: None }));
         }
         let degraded_register = if register == Some("bolder") { t::DEGRADED_BOLDER.to_string() } else { String::new() };
+        let catalog_network_guidance = if telemetry::env_opts_out(env.get("IMPECCABLE_NO_REMOTE_CATALOG")) {
+            "Remote catalog access is disabled by IMPECCABLE_NO_REMOTE_CATALOG; use the grounded candidates below and do not retry the catalog over the network."
+        } else {
+            "Remote catalog access was unavailable; proceed with the grounded candidates below, or retry this command later when the catalog service is reachable."
+        };
         let mut pairs = common.clone();
         pairs.push(("DEGRADEDHEADER", &degraded_header));
         pairs.push(("DEGRADEDREGISTER", &degraded_register));
@@ -586,6 +594,7 @@ fn render_roll(env: &Env, cwd: &str, budget: &mut ApiBudget, a: &SeedArgs) -> Re
         pairs.push(("PROMOTEDINSTRUCTION", &promoted));
         pairs.push(("AUTHORITYINSTRUCTION", &authority));
         pairs.push(("RESTATED_ASSIGNED_OR_DEALT", &restated_assigned_or_dealt));
+        pairs.push(("CATALOG_NETWORK_GUIDANCE", catalog_network_guidance));
         return Ok((scope, reroll, fill(t::DEGRADED_BODY, &pairs), true, RollMeta { worlds: vec![], api: false, pool_revision: None, hand_id: None }));
     };
 
@@ -842,6 +851,35 @@ mod tests {
             std::fs::write(skill.join("reference").join(format!("{}.md", file)), body).unwrap();
         }
         (proj, skill)
+    }
+
+    #[test]
+    fn no_remote_catalog_blocks_roll_and_card_urls_but_keeps_local_catalogs() {
+        let proj = std::env::temp_dir().join(format!("impeccable-catalog-off-{}", std::process::id()));
+        let env = Env::from([("IMPECCABLE_NO_REMOTE_CATALOG".into(), "1".into())]);
+        let mut budget = ApiBudget::new(&env);
+        assert!(fetch_roll(&env, &proj.to_string_lossy(), &mut budget, "direction", "k", None, None, None, 0).is_none());
+        assert!(card_base(&env).is_empty());
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/concept-catalog");
+        assert!(load_local(&fixture.to_string_lossy()).is_some());
+        let (_, board, hero) = challenger_card(&env, &serde_json::json!({"id":"world", "cardBoard":"https://impeccable.style/worlds/cards/world.webp", "cardHero":"https://impeccable.style/worlds/cards/world-hero.webp"}));
+        assert!(board.is_empty() && hero.is_empty(), "disabled catalog must not emit fallback card URLs");
+    }
+
+    #[test]
+    fn disabled_remote_catalog_degradation_does_not_suggest_network_retry() {
+        let proj = std::env::temp_dir().join(format!("impeccable-catalog-guidance-{}", std::process::id()));
+        let env = Env::from([
+            ("IMPECCABLE_NO_REMOTE_CATALOG".into(), "1".into()),
+            ("IMPECCABLE_CATALOG_DIR".into(), proj.join("missing").to_string_lossy().into_owned()),
+            ("IMPECCABLE_API_URL".into(), "http://127.0.0.1:9/api".into()),
+            ("IMPECCABLE_API_TIMEOUT".into(), "10".into()),
+        ]);
+        let args = SeedArgs { scope: Some("direction".into()), key: "k".into(), reroll: 0.0, register: None, mode: None, grain: None, platform: None, candidate_count: 5.0, build_path: None, fresh_key: false };
+        let mut budget = ApiBudget::new(&env);
+        let (_, _, out, _, _) = render_roll(&env, &proj.to_string_lossy(), &mut budget, &args).unwrap();
+        assert!(out.contains("disabled by IMPECCABLE_NO_REMOTE_CATALOG"), "{out}");
+        assert!(!out.contains("retry this command") && !out.contains("network-enabled"), "{out}");
     }
 
     fn seed(proj: &std::path::Path, skill: &std::path::Path, catalog: bool, args: &[&str]) -> (i32, String) {
@@ -1184,7 +1222,7 @@ mod tests {
         (base, seen)
     }
 
-    fn seed_api(proj: &std::path::Path, skill: &std::path::Path, base: &str, args: &[&str]) -> String {
+    fn seed_api_unconsented(proj: &std::path::Path, skill: &std::path::Path, base: &str, args: &[&str]) -> String {
         let env = Env::from([
             ("IMPECCABLE_SKILL_DIR".into(), skill.to_string_lossy().into_owned()),
             ("IMPECCABLE_CATALOG_DIR".into(), proj.join("no-such-catalog").to_string_lossy().into_owned()),
@@ -1204,6 +1242,14 @@ mod tests {
         out
     }
 
+    fn seed_api_opted_in(proj: &std::path::Path, skill: &std::path::Path, base: &str, args: &[&str]) -> String {
+        let home = proj.join("home");
+        std::fs::create_dir_all(home.join(".impeccable")).unwrap();
+        let consent = home.join(".impeccable/config.json");
+        if !consent.exists() { std::fs::write(consent, r#"{"telemetry": true}"#).unwrap(); }
+        seed_api_unconsented(proj, skill, base, args)
+    }
+
     /// The bodies posted to /api/chosen, each round's random pingId masked.
     fn chosen_bodies(seen: &Seen) -> Vec<String> {
         let ping = regex::Regex::new(r#","pingId":"[0-9a-f]{32}""#).unwrap();
@@ -1215,7 +1261,7 @@ mod tests {
         let (proj, skill) = fixture("api-roll", &[("mode-persuade", MODE_FILE)]);
         let (base, seen) = roll_api();
         let engine = format!("impeccable/{}+engine test", env!("CARGO_PKG_VERSION"));
-        let out = seed_api(&proj, &skill, &base, &["--scope", "direction", "--mode", "persuade", "--from", "k1"]);
+        let out = seed_api_opted_in(&proj, &skill, &base, &["--scope", "direction", "--mode", "persuade", "--from", "k1"]);
         assert!(out.contains("source: api; approved pool: 0123456789ab"), "{out}");
         assert!(out.contains("--from k1 --scope direction --mode persuade plus what the user did:\n"), "round 0 carries no --reroll: {out}");
         let roll = seen.lock().unwrap()[0].clone();
@@ -1229,36 +1275,46 @@ mod tests {
         assert_eq!(round.pool_revision.as_deref(), Some("0123456789ab"));
 
         // A re-roll's TELEMETRY line names its round.
-        let out = seed_api(&proj, &skill, &base, &["--scope", "direction", "--mode", "persuade", "--from", "k1", "--reroll", "2"]);
+        let out = seed_api_opted_in(&proj, &skill, &base, &["--scope", "direction", "--mode", "persuade", "--from", "k1", "--reroll", "2"]);
         assert!(out.contains("--from k1 --scope direction --mode persuade --reroll 2 plus what the user did:\n"), "{out}");
+    }
+
+    #[test]
+    fn api_dispatcher_without_user_consent_never_posts_a_choice() {
+        let (proj, skill) = fixture("api-no-consent", &[("mode-persuade", MODE_FILE)]);
+        let (base, seen) = roll_api();
+        let out = seed_api_unconsented(&proj, &skill, &base, &["--kind", "assigned", "--from", "k1", "--scope", "direction"]);
+        assert_eq!(out, "choice ping skipped\n");
+        let requests = seen.lock().unwrap();
+        assert!(requests.iter().all(|r| !(r.0 == "POST" && r.1 == "/api/chosen")), "dispatcher must make no /chosen POST: {requests:?}");
     }
 
     #[test]
     fn agent_pings_fill_the_round_from_the_ledger_and_send_only_dealt_ids() {
         let (proj, skill) = fixture("api-ping", &[("mode-persuade", MODE_FILE)]);
         let (base, seen) = roll_api();
-        seed_api(&proj, &skill, &base, &["--scope", "direction", "--mode", "persuade", "--from", "k1"]);
-        seed_api(&proj, &skill, &base, &["--scope", "direction", "--mode", "persuade", "--from", "k1", "--reroll", "1"]);
+        seed_api_opted_in(&proj, &skill, &base, &["--scope", "direction", "--mode", "persuade", "--from", "k1"]);
+        seed_api_opted_in(&proj, &skill, &base, &["--scope", "direction", "--mode", "persuade", "--from", "k1", "--reroll", "1"]);
         // No --reroll: the latest round. An agent-invented id is dropped and the kind still goes.
-        let out = seed_api(&proj, &skill, &base, &["--kind", "challenger", "--chosen", "challenger-teletext", "--from", "k1", "--scope", "direction", "--mode", "persuade"]);
+        let out = seed_api_opted_in(&proj, &skill, &base, &["--kind", "challenger", "--chosen", "challenger-teletext", "--from", "k1", "--scope", "direction", "--mode", "persuade"]);
         assert_eq!(out, "choice recorded\n");
         assert_eq!(chosen_bodies(&seen).last().unwrap(), r#"{"key":"k1","scope":"direction","mode":"persuade","kind":"challenger","reroll":1,"poolRevision":"0123456789ab","handId":"00112233445566778899aabbccddeeff","pingId":"<PING>","source":"agent"}"#);
         let post = seen.lock().unwrap().iter().rfind(|r| r.0 == "POST").cloned().unwrap();
         assert_eq!((post.1.as_str(), post.2.as_str()), ("/api/chosen", format!("impeccable/{}+engine test", env!("CARGO_PKG_VERSION")).as_str()));
         // The same round again: already sent.
-        let out = seed_api(&proj, &skill, &base, &["--kind", "assigned", "--from", "k1", "--scope", "direction", "--reroll", "1"]);
+        let out = seed_api_opted_in(&proj, &skill, &base, &["--kind", "assigned", "--from", "k1", "--scope", "direction", "--reroll", "1"]);
         assert_eq!(out, "choice already recorded\n");
         // Round 0 by --reroll: a dealt catalog id passes.
-        let out = seed_api(&proj, &skill, &base, &["--kind", "challenger", "--chosen", "microfiche-reader", "--from", "k1", "--scope", "direction", "--reroll", "0"]);
+        let out = seed_api_opted_in(&proj, &skill, &base, &["--kind", "challenger", "--chosen", "microfiche-reader", "--from", "k1", "--scope", "direction", "--reroll", "0"]);
         assert_eq!(out, "choice recorded\n");
         assert_eq!(chosen_bodies(&seen).last().unwrap(), r#"{"chosenId":"microfiche-reader","key":"k1","scope":"direction","kind":"challenger","reroll":0,"poolRevision":"0123456789ab","handId":"00112233445566778899aabbccddeeff","pingId":"<PING>","source":"agent"}"#);
         // No ledger for the key: sent as given, with the --reroll round.
         let n = chosen_bodies(&seen).len();
-        let out = seed_api(&proj, &skill, &base, &["--kind", "challenger", "--chosen", "own-grounded-3", "--from", "k9", "--scope", "direction", "--reroll", "3"]);
+        let out = seed_api_opted_in(&proj, &skill, &base, &["--kind", "challenger", "--chosen", "own-grounded-3", "--from", "k9", "--scope", "direction", "--reroll", "3"]);
         assert_eq!(out, "choice recorded\n");
         assert_eq!(chosen_bodies(&seen)[n], r#"{"chosenId":"own-grounded-3","key":"k9","scope":"direction","kind":"challenger","reroll":3,"source":"agent"}"#);
         // An out-of-range --reroll is ignored rather than sent.
-        seed_api(&proj, &skill, &base, &["--kind", "pick", "--from", "k8", "--scope", "direction", "--reroll", "12"]);
+        seed_api_opted_in(&proj, &skill, &base, &["--kind", "pick", "--from", "k8", "--scope", "direction", "--reroll", "12"]);
         assert_eq!(chosen_bodies(&seen).last().unwrap(), r#"{"key":"k8","scope":"direction","kind":"pick","reroll":0,"source":"agent"}"#);
     }
 
@@ -1266,19 +1322,19 @@ mod tests {
     fn agent_pings_report_rejected_hands_and_cards_by_position() {
         let (proj, skill) = fixture("api-ping-reroll", &[("mode-persuade", MODE_FILE)]);
         let (base, seen) = roll_api();
-        seed_api(&proj, &skill, &base, &["--scope", "surface", "--mode", "operate", "--from", "s1"]);
+        seed_api_opted_in(&proj, &skill, &base, &["--scope", "surface", "--mode", "operate", "--from", "s1"]);
         // A surface round's dealt structure other than the lead goes by position.
-        let out = seed_api(&proj, &skill, &base, &["--option", "2", "--from", "s1", "--scope", "surface", "--mode", "operate"]);
+        let out = seed_api_opted_in(&proj, &skill, &base, &["--option", "2", "--from", "s1", "--scope", "surface", "--mode", "operate"]);
         assert_eq!(out, "choice recorded\n");
         assert_eq!(chosen_bodies(&seen).last().unwrap(), r#"{"key":"s1","scope":"surface","mode":"operate","option":2,"reroll":0,"poolRevision":"0123456789ab","handId":"00112233445566778899aabbccddeeff","pingId":"<PING>","source":"agent"}"#);
         // A rejected hand: kind reroll, the steer as register, never a card id.
-        seed_api(&proj, &skill, &base, &["--scope", "direction", "--from", "d1"]);
-        let out = seed_api(&proj, &skill, &base, &["--kind", "reroll", "--chosen", "teletext-service", "--register", "bolder", "--from", "d1", "--scope", "direction"]);
+        seed_api_opted_in(&proj, &skill, &base, &["--scope", "direction", "--from", "d1"]);
+        let out = seed_api_opted_in(&proj, &skill, &base, &["--kind", "reroll", "--chosen", "teletext-service", "--register", "bolder", "--from", "d1", "--scope", "direction"]);
         assert_eq!(out, "choice recorded\n");
         assert_eq!(chosen_bodies(&seen).last().unwrap(), r#"{"key":"d1","scope":"direction","kind":"reroll","register":"bolder","reroll":0,"poolRevision":"0123456789ab","handId":"00112233445566778899aabbccddeeff","pingId":"<PING>","source":"agent"}"#);
-        assert_eq!(seed_api(&proj, &skill, &base, &["--kind", "assigned", "--from", "d1", "--scope", "direction"]), "choice already recorded\n");
+        assert_eq!(seed_api_opted_in(&proj, &skill, &base, &["--kind", "assigned", "--from", "d1", "--scope", "direction"]), "choice already recorded\n");
         // The surface TELEMETRY line names the position flag and the re-roll report.
-        let out = seed_api(&proj, &skill, &base, &["--scope", "surface", "--mode", "operate", "--from", "s2"]);
+        let out = seed_api_opted_in(&proj, &skill, &base, &["--scope", "surface", "--mode", "operate", "--from", "s2"]);
         assert!(out.contains("--option <n>"), "{out}");
         assert!(out.contains("--kind reroll"), "{out}");
     }
@@ -1287,15 +1343,15 @@ mod tests {
     fn a_seed_reference_stands_for_its_key_on_the_machine_that_rolled_it() {
         let (proj, skill) = fixture("seed-reference", &[("mode-persuade", MODE_FILE)]);
         let (base, seen) = roll_api();
-        let first = seed_api(&proj, &skill, &base, &["--scope", "direction", "--mode", "persuade", "--from", "3f9a1c2e"]);
+        let first = seed_api_opted_in(&proj, &skill, &base, &["--scope", "direction", "--mode", "persuade", "--from", "3f9a1c2e"]);
         let reference = tl(&proj).reference("3f9a1c2e").unwrap();
         assert!(first.contains(&format!("SEED REFERENCE: {reference}.")), "{first}");
         // The reference reproduces the same deal and asks the API with the real key.
-        let again = seed_api(&proj, &skill, &base, &["--scope", "direction", "--mode", "persuade", "--from", &reference]);
+        let again = seed_api_opted_in(&proj, &skill, &base, &["--scope", "direction", "--mode", "persuade", "--from", &reference]);
         assert_eq!(again, first);
         assert!(seen.lock().unwrap().iter().filter(|r| r.0 == "GET").all(|r| r.1.contains("key=3f9a1c2e")), "{:?}", seen.lock().unwrap());
         // The ping by reference carries the key.
-        assert_eq!(seed_api(&proj, &skill, &base, &["--kind", "assigned", "--from", &reference, "--scope", "direction"]), "choice recorded\n");
+        assert_eq!(seed_api_opted_in(&proj, &skill, &base, &["--kind", "assigned", "--from", &reference, "--scope", "direction"]), "choice recorded\n");
         assert!(chosen_bodies(&seen).last().unwrap().contains(r#""key":"3f9a1c2e""#));
         // A reference rolled elsewhere is refused with the way out, never rolled as a key.
         let env = Env::from([
@@ -1311,7 +1367,7 @@ mod tests {
         let err = String::from_utf8(cap.stderr.borrow().clone()).unwrap();
         assert!(err.contains("is a seed reference this machine has no record of") && err.contains("pass the original key with --from"), "{err}");
         let n = chosen_bodies(&seen).len();
-        assert_eq!(seed_api(&proj, &skill, &base, &["--kind", "assigned", "--from", &unknown, "--scope", "direction"]), "choice ping skipped\n");
+        assert_eq!(seed_api_opted_in(&proj, &skill, &base, &["--kind", "assigned", "--from", &unknown, "--scope", "direction"]), "choice ping skipped\n");
         assert_eq!(chosen_bodies(&seen).len(), n);
     }
 
@@ -1322,7 +1378,7 @@ mod tests {
         let home = proj.join("home");
         std::fs::create_dir_all(home.join(".impeccable")).unwrap();
         std::fs::write(home.join(".impeccable/config.json"), r#"{"telemetry": false}"#).unwrap();
-        let out = seed_api(&proj, &skill, &base, &["--scope", "direction", "--from", "k1"]);
+        let out = seed_api_opted_in(&proj, &skill, &base, &["--scope", "direction", "--from", "k1"]);
         assert!(out.contains("source: api;"), "the roll still happens: {out}");
         let roll = seen.lock().unwrap()[0].clone();
         assert_eq!(roll.0, "GET");
@@ -1332,10 +1388,10 @@ mod tests {
         assert!(record.get("poolRevision").is_none() && record.get("source").is_none(), "{record}");
         assert_eq!(tl(&proj).round("k1", None), None);
         assert_eq!(tl(&proj).resolve(&tl(&proj).reference("k1").unwrap()).unwrap(), "k1");
-        assert_eq!(seed_api(&proj, &skill, &base, &["--kind", "assigned", "--from", "k1", "--scope", "direction"]), "choice ping skipped\n");
+        assert_eq!(seed_api_opted_in(&proj, &skill, &base, &["--kind", "assigned", "--from", "k1", "--scope", "direction"]), "choice ping skipped\n");
         assert!(chosen_bodies(&seen).is_empty());
         // DO_NOT_TRACK=0 is not an opt-out.
-        std::fs::remove_file(home.join(".impeccable/config.json")).unwrap();
+        std::fs::write(home.join(".impeccable/config.json"), r#"{"telemetry": true}"#).unwrap();
         assert!(!telemetry::telemetry_disabled(&Env::from([("DO_NOT_TRACK".into(), "0".into()), ("HOME".into(), home.to_string_lossy().into_owned())]), &proj.to_string_lossy()));
     }
 
@@ -1416,7 +1472,13 @@ mod tests {
                 Home::Blocked => blocked.clone(),
             };
             let env_for = |h: Home| {
-                let h = home_of(h).to_string_lossy().into_owned();
+                let hpath = home_of(h);
+                if matches!(h, Home::Writable) {
+                    std::fs::create_dir_all(hpath.join(".impeccable")).unwrap();
+                    let consent = hpath.join(".impeccable/config.json");
+                    if !consent.exists() { std::fs::write(consent, r#"{"telemetry": true}"#).unwrap(); }
+                }
+                let h = hpath.to_string_lossy().into_owned();
                 Env::from([
                     ("IMPECCABLE_SKILL_DIR".into(), skill.to_string_lossy().into_owned()),
                     ("IMPECCABLE_CATALOG_DIR".into(), proj.join("no-such-catalog").to_string_lossy().into_owned()),
@@ -1465,14 +1527,30 @@ mod tests {
             assert_eq!((code, again == out1), (0, true), "{name}: --from by reference reproduces the deal");
             // The page claims and confirms round 1, and the agent's rerun is a no-op.
             let l = telemetry::Ledger::new(&env_for(after), &proj.to_string_lossy());
-            let claimed = l.claim("k1", 1).unwrap_or_else(|| panic!("{name}: the page's claim"));
-            l.confirm("k1", 1, "picker", claimed.ping_id.as_deref());
-            assert_eq!(call(after, &["--kind", "assigned", "--from", &ref0, "--scope", "direction", "--reroll", "1"]).1, "choice already recorded\n", "{name}");
-            // Round 0's report goes out from the agent with that round's own pingId.
-            let r0 = l.round("k1", Some(0)).unwrap_or_else(|| panic!("{name}: round 0"));
-            assert_eq!(call(after, &["--kind", "assigned", "--from", "k1", "--scope", "direction", "--reroll", "0"]).1, "choice recorded\n", "{name}");
-            let body = seen.lock().unwrap().iter().rfind(|r| r.0 == "POST").unwrap().3.clone();
-            assert!(body.contains(&format!(r#""pingId":"{}""#, r0.ping_id.unwrap())), "{name}: {body}");
+            if matches!(after, Home::Writable) {
+                let claimed = l.claim("k1", 1).unwrap_or_else(|| panic!("{name}: the page's claim"));
+                l.confirm("k1", 1, "picker", claimed.ping_id.as_deref());
+                assert_eq!(call(after, &["--kind", "assigned", "--from", &ref0, "--scope", "direction", "--reroll", "1"]).1, "choice already recorded\n", "{name}");
+                let r1 = l.round("k1", Some(1)).unwrap_or_else(|| panic!("{name}: opted-in round 1 must be recorded"));
+                assert!(r1.ping_id.is_some(), "{name}: opted-in round 1 stores its ping id");
+                if matches!(before, Home::Writable) {
+                    let r0 = l.round("k1", Some(0)).unwrap_or_else(|| panic!("{name}: opted-in round 0 must be recorded"));
+                    let ping_id = r0.ping_id.expect("opted-in round stores its ping id");
+                    assert_eq!(call(after, &["--kind", "assigned", "--from", "k1", "--scope", "direction", "--reroll", "0"]).1, "choice recorded\n", "{name}");
+                    let body = seen.lock().unwrap().iter().rfind(|r| r.0 == "POST").unwrap().3.clone();
+                    assert!(body.contains(&format!(r#""pingId":"{}""#, ping_id)), "{name}: {body}");
+                } else {
+                    assert!(l.round("k1", Some(0)).is_none(), "{name}: round 0 rolled without consent must have no telemetry state");
+                }
+            } else {
+                if matches!(before, Home::Writable) {
+                    assert!(l.round("k1", Some(0)).is_some(), "the earlier opted-in round remains recorded");
+                } else {
+                    assert!(l.round("k1", Some(0)).is_none(), "round 0 rolled without consent has no telemetry state");
+                }
+                assert!(l.round("k1", Some(1)).is_none(), "round 1 rolled with a blocked home has no telemetry state");
+                assert_eq!(call(after, &["--kind", "assigned", "--from", &ref0, "--scope", "direction", "--reroll", "1"]).1, "choice ping skipped\n");
+            }
         }
     }
 

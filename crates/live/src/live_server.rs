@@ -619,6 +619,14 @@ fn text_res(status: u16, content_type: Option<&str>, body: &str) -> Response {
     r.text(body)
 }
 
+fn source_response(body: &str) -> Response {
+    Response::new(200)
+        .header("Content-Type", "text/plain; charset=utf-8")
+        .header("X-Content-Type-Options", "nosniff")
+        .header("Cache-Control", "no-store")
+        .text(body)
+}
+
 fn handle_connection(shared: Shared, mut stream: TcpStream, mut ticket: Ticket) {
     set_header_timeout(&stream);
     // Read the whole request under a total wall-clock deadline. Without it a
@@ -889,44 +897,16 @@ fn handle_connection(shared: Shared, mut stream: TcpStream, mut ticket: Ticket) 
                 return;
             }
             let file_path = req.query_get("path").unwrap_or("");
-            if file_path.is_empty() || file_path.contains("..") {
+            if file_path.is_empty() {
                 respond(&mut stream, &cors, text_res(400, None, "Bad path"));
                 return;
             }
             let cwd = lock(&shared).cwd.clone();
-            let abs = jsp::resolve(&cwd, &[file_path]);
-            // JS (#618): realpath both sides so a symlink under the root
-            // cannot lead the read out of the workspace.
-            let (real_root, real_target) = match (std::fs::canonicalize(&cwd), std::fs::canonicalize(&abs)) {
-                (Ok(r), Ok(t)) => (
-                    r.to_string_lossy().into_owned(),
-                    t.to_string_lossy().into_owned(),
-                ),
-                _ => {
-                    respond(&mut stream, &cors, text_res(404, None, "File not found"));
-                    return;
-                }
-            };
-            // Confine to the project root after symlink resolution. A bare
-            // `startsWith(cwd)` string check lets a sibling dir whose name
-            // extends the root name (projeto -> projeto-backup) slip
-            // through; compare on the relative path instead. An empty rel
-            // means the request resolved to the root directory itself, which
-            // this file route never serves.
-            let rel = jsp::relative("/", &real_root, &real_target);
-            if rel.is_empty() || rel.starts_with("..") || jsp::is_absolute(&rel) {
-                respond(&mut stream, &cors, text_res(403, None, "Forbidden"));
-                return;
+            match crate::source_access::read_source(std::path::Path::new(&cwd), file_path) {
+                Ok(content) => respond(&mut stream, &cors, source_response(&content)),
+                Err(404) => respond(&mut stream, &cors, text_res(404, None, "File not found")),
+                Err(_) => respond(&mut stream, &cors, text_res(403, None, "Forbidden")),
             }
-            let Some(content) = safe_read(&real_target) else {
-                respond(&mut stream, &cors, text_res(404, None, "File not found"));
-                return;
-            };
-            respond(
-                &mut stream,
-                &cors,
-                text_res(200, Some("text/html; charset=utf-8"), &content),
-            );
         }
         ("/events", "GET") => handle_sse(
             &shared,
@@ -2990,6 +2970,24 @@ fn handle_agent_target_claim_post(
 #[cfg(test)]
 mod content_type_tests {
     use super::*;
+
+    #[test]
+    fn security_source_response_is_plain_text_and_uncacheable() {
+        let response = super::source_response("body");
+        assert!(response.headers.iter().any(|(k,v)| k == "Content-Type" && v == "text/plain; charset=utf-8"));
+        assert!(response.headers.iter().any(|(k,v)| k == "X-Content-Type-Options" && v == "nosniff"));
+        assert!(response.headers.iter().any(|(k,v)| k == "Cache-Control" && v == "no-store"));
+    }
+
+    #[test]
+    fn security_source_allowlist_rejects_secrets_and_accepts_live_files() {
+        for path in [".env", "config.json", "secrets.json", "access-token.json", "id_rsa", ".ssh/id_rsa", "src/.env.local", ".impeccable/unrelated/manifest.json", ".secret/.impeccable/live/previews/session/manifest.json"] {
+            assert!(!crate::source_access::allowed_source_path(path), "{path}");
+        }
+        for path in ["src/App.svelte", "src/app.ts", "src/site.css", "src/index.html", ".impeccable/live/previews/session/manifest.json", ".impeccable/live/previews/session/params.json", ".impeccable/live/previews/session/r2/params.json", "node_modules/.impeccable-live/session/manifest.json"] {
+            assert!(crate::source_access::allowed_source_path(path), "{path}");
+        }
+    }
 
     // upstream 632912b5 / #690: the generated /live.js and /detect.js responses
     // must declare charset=utf-8 so non-ASCII bytes in the scripts are decoded

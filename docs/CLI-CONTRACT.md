@@ -25,6 +25,22 @@ Sections:
 
 ---
 
+## Personal fork wrapper
+
+The installed Codex and Claude `scripts/impeccable` entrypoints bind their
+provider-specific `IMPECCABLE_SKILL_DIR`, `IMPECCABLE_SELF`, and
+`IMPECCABLE_PROVIDER_ID`, then call
+`~/.local/bin/impeccable-fork`. The wrapper pins
+`~/.local/share/impeccable-fork/engine`, sets it as `IMPECCABLE_BIN`, and
+supplies the default private runtime settings. Standalone wrapper use defaults
+`IMPECCABLE_SELF` to the wrapper so emitted follow-up commands remain wrapped.
+
+The wrapper blocks top-level `install`, `update`, `check` and `link`, and
+`skills install|update|check|link` and `loop install|update`, regardless of `--force` or help appearing
+before the verb. Safe help remains available. Rebuild and reinstall from the
+checkout instead. See [FORK.md](FORK.md) for build provenance, transaction
+backups, the compatibility bridge and its limits.
+
 ## 1. Detect CLI and misc verbs
 
 Source snapshot: repo `impeccable-second` @ main (f88b2837), 2026-08-17. Node `>=22.18.0`, package `impeccable` v3.6.0, `"type": "module"`, `bin: { impeccable: cli/bin/cli.js }`, `main`/`exports["."]`: `cli/engine/detect-antipatterns.mjs`, `exports["./browser"]`: `cli/engine/detect-antipatterns-browser.js`.

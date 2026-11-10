@@ -60,6 +60,14 @@ export default function cases() {
       verb: 'detect',
       args: ['--no-config', `<REPO>/${rel}`],
       isolateHome: false,
+      ...(ent.name === 'framework-vite' ? {
+        // Host port ownership is environmental; normalize only Vite's exact 8080 advisory block.
+        normalize: [[
+          '^(?:Vite project detected \\(vite\\.config\\.ts\\)\\.\\n(?:Port 8080 is in use by another service\\. Start the Vite dev server and scan via URL for best results\\.|Vite dev server is already running on port 8080\\. Scan via URL for best results\\.)|Vite dev server detected on localhost:8080\\.\\nFor more accurate results, scan the running site:\\n  npx impeccable detect http://localhost:8080)$',
+          'm',
+          'Vite project detected (vite.config.ts).\nStart the dev server and scan via URL for best results:\n  npx impeccable detect http://localhost:8080',
+        ]],
+      } : {}),
     });
   }
 

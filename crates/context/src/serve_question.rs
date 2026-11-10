@@ -691,6 +691,7 @@ fn card_fetch_allowed(env: &Env, url: &str) -> bool {
 /// image's own type, so a later `--ref` of the path sends the right one.
 /// `IMPECCABLE_IMAGE_GEN_FAKE` makes no request.
 fn fetch_world_cards(env: &Env, cwd: &str, worlds: &[Value]) -> Vec<(String, String, String)> {
+    if crate::telemetry::env_opts_out(env.get("IMPECCABLE_NO_REMOTE_CATALOG")) { return Vec::new(); }
     let s = |w: &Value, k: &str| w.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
     let offline = env_set(env, "IMPECCABLE_IMAGE_GEN_FAKE");
     // (id, kind, url) per image, board then hero per world.
@@ -1506,7 +1507,7 @@ pub fn run(argv: &[String], io: &mut Io) -> i32 {
         ignore_questions_dir(&qdir);
         // Every round starts here, and its decision comps land in `.impeccable/mocks/decision/` after the page serves.
         impeccable_common::git::ignore_runtime_output(&cwd);
-        let key = a.arg("key").unwrap_or_else(random_key);
+        let key = match a.arg("key") { Some(key) => key, None => match random_key() { Ok(key) => key, Err(e) => { io.err(&format!("serve-question: could not generate a secure question key: {e}. Supply --key explicitly and retry.\n")); return 1; } } };
         let hand = match start_hand(&qdir, &key, &cwd, &start_payload, &dealt_worlds(roll.as_deref(), &start_payload), seed_with_key(roll_seed(roll.as_deref(), &start_payload), &env, &cwd)) {
             Ok(h) => h,
             Err(e) => {
@@ -2050,14 +2051,18 @@ fn touch_now(p: &str) {
     }
 }
 
-fn random_key() -> String {
-    // Math.random().toString(16).slice(2, 10)
-    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    let mut x = (t as u64) ^ ((std::process::id() as u64) << 32) ^ 0x9E3779B97F4A7C15;
-    x ^= x >> 33;
-    x = x.wrapping_mul(0xff51afd7ed558ccd);
-    x ^= x >> 33;
-    format!("{:08x}", (x & 0xffffffff) as u32)
+fn random_key() -> Result<String, String> {
+    impeccable_common::seed::random_hex32().ok_or_else(|| "operating system randomness is unavailable".to_string())
+}
+
+#[cfg(test)]
+mod random_key_tests {
+    #[test]
+    fn generated_question_keys_have_128_bits_of_os_randomness() {
+        let key = super::random_key().expect("OS randomness should be available in the test process");
+        assert_eq!(key.len(), 32);
+        assert!(key.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
 }
 
 pub fn open_system_browser(url: &str, env: &Env) -> bool {
@@ -4095,6 +4100,9 @@ mod tests {
             start_hand(&qdir, "pk", &cwd, &payload, &dealt_worlds(roll.as_deref(), &payload), seed).unwrap();
         };
         let (base, seen) = chosen_api();
+        let home = dir.join("home");
+        std::fs::create_dir_all(home.join(".impeccable")).unwrap();
+        std::fs::write(home.join(".impeccable/config.json"), r#"{"telemetry":true}"#).unwrap();
 
         deal(0);
         assert_eq!(answer_on_page(&dir, &payload, "challenger-teletext", &[("IMPECCABLE_API_URL", &base), ("IMPECCABLE_TELEMETRY_CHANNEL", "test")]), 0);

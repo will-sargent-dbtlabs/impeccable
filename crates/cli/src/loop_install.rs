@@ -193,10 +193,14 @@ fn refuse_running(app: &Path) -> Result<()> {
     if !out.status.success() {
         return Err("Cannot check whether Loop is running; quit Loop and retry.".into());
     }
-    if String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .any(|line| fs::canonicalize(line.trim()).is_ok_and(|path| path == exe))
-    {
+    refuse_running_from_listing(&exe, &String::from_utf8_lossy(&out.stdout))
+}
+
+fn refuse_running_from_listing(exe: &Path, listing: &str) -> Result<()> {
+    if listing.lines().any(|line| {
+        let candidate = line.trim();
+        !candidate.is_empty() && fs::canonicalize(candidate).is_ok_and(|path| path == exe)
+    }) {
         return Err(
             "Impeccable Loop is running. Quit Loop first, then run impeccable loop update.".into(),
         );
@@ -244,6 +248,16 @@ pub(crate) fn run(args: &[String], io: &mut Io) -> i32 {
 }
 
 fn run_inner(args: &[String], io: &Io, manifest: &str, os: &str) -> Result<String> {
+    run_inner_with_process_listing(args, io, manifest, os, None)
+}
+
+fn run_inner_with_process_listing(
+    args: &[String],
+    io: &Io,
+    manifest: &str,
+    os: &str,
+    process_listing: Option<&str>,
+) -> Result<String> {
     // Arguments first, so usage and its errors read the same on every OS (the oracle records them).
     if args.first().is_some_and(|s| s == "--help" || s == "-h") {
         return Ok(USAGE.into());
@@ -336,7 +350,11 @@ fn run_inner(args: &[String], io: &Io, manifest: &str, os: &str) -> Result<Strin
                 "Loop {installed} is newer than the newest pinned release ({version}); nothing to update.\n"
             ));
         }
-        refuse_running(&app)?;
+        if let Some(listing) = process_listing {
+            refuse_running_from_listing(&executable(&app)?, listing)?;
+        } else {
+            refuse_running(&app)?;
+        }
     }
     let base = io
         .env("IMPECCABLE_DOWNLOAD_BASE")
@@ -368,9 +386,7 @@ fn run_inner(args: &[String], io: &Io, manifest: &str, os: &str) -> Result<Strin
     if plist(&staged, "CFBundleShortVersionString")? != version.to_string() {
         return Err("Loop bundle version does not match its release.".into());
     }
-    if update {
-        refuse_running(&app)?;
-    }
+    if update { refuse_running(&app)?; }
     swap(&staged, &app, &backup, update)?;
     if !no_open {
         let status = Command::new("/usr/bin/open")

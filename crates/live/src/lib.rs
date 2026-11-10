@@ -31,6 +31,7 @@ pub mod roots;
 pub mod server;
 pub mod server_state;
 pub mod session;
+pub mod source_access;
 pub mod source_lock;
 pub mod source_search;
 pub mod svelte_ast;

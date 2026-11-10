@@ -88,15 +88,10 @@ impl BrowserEngine {
         BrowserEngine::new(impeccable_common::process_env())
     }
 
-    /// JS `launchArgs = process.env.CI ? ['--no-sandbox','--disable-setuid-sandbox'] : []`.
+    /// Keep Chromium sandboxing enabled in every environment. The explicit
+    /// dangerous opt-out is passed separately to the browser launcher.
     fn launch_args(&self) -> Vec<String> {
-        match self.env.get("CI") {
-            Some(v) if !v.is_empty() => vec![
-                "--no-sandbox".to_string(),
-                "--disable-setuid-sandbox".to_string(),
-            ],
-            _ => Vec::new(),
-        }
+        Vec::new()
     }
 
     fn dangerous_no_sandbox(&self) -> bool {
@@ -2402,6 +2397,19 @@ fn truthy(v: Option<&Value>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn security_ci_keeps_chrome_sandbox_unless_explicitly_disabled() {
+        let ci = BrowserEngine::new([(String::from("CI"), String::from("1"))].into_iter().collect());
+        assert!(ci.launch_args().is_empty());
+        assert!(!ci.dangerous_no_sandbox());
+        let opted_out = BrowserEngine::new([
+            (String::from("CI"), String::from("1")),
+            (String::from("PUPPETEER_DANGEROUS_NO_SANDBOX"), String::from("true")),
+        ].into_iter().collect());
+        assert!(opted_out.launch_args().is_empty());
+        assert!(opted_out.dangerous_no_sandbox());
+    }
 
     #[test]
     fn motion_during_the_shot_is_more_than_half_the_box_and_16px() {

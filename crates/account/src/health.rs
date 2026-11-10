@@ -22,9 +22,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Sync is on for a signed-in person unless they turn it off (decision 1 on
-/// REN-1559 is the decider's; this is the recommended default).
-pub const SYNC_BY_DEFAULT: bool = true;
+/// Sync requires explicit opt-in with `impeccable health on`.
+pub const SYNC_BY_DEFAULT: bool = false;
 /// The whole upload, refresh included.
 const DEADLINE: Duration = Duration::from_secs(5);
 /// Bumped whenever the fingerprint or ruleset recipe below changes, so the
@@ -765,7 +764,7 @@ mod tests {
             home.to_string_lossy().into_owned(),
         )]);
         let seen_by_scan = Local::read(&env).unwrap();
-        assert!(seen_by_scan.sync());
+        assert!(!seen_by_scan.sync(), "health sync is opt-in by default");
         Local::update(&env, |l| l.sync = Some(false)).unwrap(); // `health off` meanwhile
         Local::update(&env, |l| l.noticed = Some("https://issuer 7".into())).unwrap(); // the scan's notice
         let now = Local::read(&env).unwrap();

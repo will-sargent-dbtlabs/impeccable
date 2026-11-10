@@ -17,9 +17,22 @@ Everything else is the JS contract's own environment (`IMPECCABLE_CONTEXT_DIR`,
 `IMPECCABLE_UPDATE_*`, `IMPECCABLE_STALENESS_CACHE`, `IMPECCABLE_CATALOG_DIR`,
 `IMPECCABLE_API_URL`, `IMPECCABLE_IMAGE_GEN_FAKE`, ...), read unchanged.
 
-The launcher (`launcher/impeccable`) does not export these yet; a launcher that
-sets `IMPECCABLE_SKILL_DIR="$dir/.."` and `IMPECCABLE_SELF="$0"` would make
-directives name the launcher instead of the platform binary.
+The personal fork's `impeccable-fork` wrapper pins the local installed binary
+and defaults `IMPECCABLE_NO_TELEMETRY=1`,
+`IMPECCABLE_NO_UPDATE_CHECK=1`, `IMPECCABLE_NO_REMOTE_CATALOG=1`, and
+`IMPECCABLE_PRO=off`. An explicit process can set
+`IMPECCABLE_NO_TELEMETRY=0` to request reporting, subject to the runtime's
+user/project consent checks. Its provider launchers bind `IMPECCABLE_SELF` to
+the provider launcher and `IMPECCABLE_SKILL_DIR` to that provider's installed
+skill root, with `IMPECCABLE_PROVIDER_ID=codex` or `claude-code`. The standalone wrapper defaults `IMPECCABLE_SELF` to itself, so
+follow-up directives remain routed through the policy wrapper while references
+and command syntax retain provider identity. `IMPECCABLE_NO_REMOTE_CATALOG` only governs
+Impeccable's catalog calls; it does not disable provider image generation or
+arbitrary agent/browser network access. See [FORK.md](FORK.md).
+
+The source launcher (`skill/scripts/impeccable`) also sets skill directory and
+self identity before selecting an engine. The managed provider launchers bind
+those values to the installed provider copy and select the fork wrapper directly.
 
 Oracle note: run the public repo's `tests/oracle/run.mjs` with
 `IMPECCABLE_SKILL_DIR=<public repo>/skill` (the corpus expects the native
@@ -101,8 +114,8 @@ A signed-in CLI saves the counts of each full `detect` of a git repo to the acco
 **When it uploads.** All of these must hold, and they are checked in this order, cheapest first:
 - `detect` scanned one local directory that is the top of a git work tree: the working directory or a single directory target, with no `--scope`, no `--cdp`, no piped input, no URL, and no file left unscanned. Hook scans never upload.
 - `CI` is unset or empty.
-- Telemetry is on: no `DO_NOT_TRACK` or `IMPECCABLE_NO_TELEMETRY`, and no `"telemetry": false` in the user config or in the project config of either the working directory or the scanned root (the same check the roll API's pings use; an off in either wins).
-- Sync is on: `impeccable health off` turns it off, `impeccable health on` back on. It is on by default (`SYNC_BY_DEFAULT`, the decider's question 1 on REN-1559). A `health.json` that exists but can't be read counts as off.
+- Reporting is explicitly enabled in user config; `DO_NOT_TRACK`, `IMPECCABLE_NO_TELEMETRY`, or a false telemetry setting in user/project config disables it, and missing or malformed consent counts as off.
+- Health sync is explicitly enabled with `impeccable health on`; it is off by default. A `health.json` that exists but can't be read counts as off.
 - Someone is signed in.
 
 The checks that read only the environment, `health.json` and the sign-in's `state.json` run before `detect` is asked for a report, so a run that can't upload pays nothing for it.
